@@ -1,0 +1,15 @@
+**/.git
+**/.gitignore
+**/.gitea
+**/bin
+**/obj
+**/*.user
+**/.vs
+**/.vscode
+**/.idea
+**/test-vault
+obsidian-mcp.Tests/
+.dockerignore
+README.md
+*.md
+LICENSE
