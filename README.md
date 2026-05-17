@@ -4,7 +4,12 @@ Read and write an Obsidian vault via [MCP (Model Context Protocol)](https://mode
 gated by OAuth-issued JWT bearer tokens.
 
 This server pairs with any OAuth 2.1 + PKCE authorization server that can mint
-HS256 JWTs containing `aud`, `iss`, `sub`, `scope` claims. Bring your own AS.
+JWTs containing `aud`, `iss`, `sub`, `scope` claims. Two signing modes:
+
+- **HS256** (default) — shared symmetric key between AS and this server. Use for self-built minimal AS.
+- **RS256** — fetches JWKS automatically via OIDC discovery from `<Issuer>/.well-known/openid-configuration`. Use with any standard provider: [Logto](https://logto.io), [ZITADEL](https://zitadel.com), [Keycloak](https://www.keycloak.org), [Auth0](https://auth0.com), etc.
+
+See [Choosing an AS](#choosing-an-as) below for setup guidance.
 
 ## Architecture
 
@@ -47,10 +52,11 @@ prefixes (double underscore = nested section). Production values must be injecte
 | `Vault__Root` | `/vault` | yes | Vault root directory inside the container |
 | `Vault__Blacklist__0` | — | no | Extra path segments to deny (`.obsidian`, `.trash`, `.git` are always denied) |
 | `Vault__WriteWhitelist__0` | — | for write tools | Writable path entries (see below) |
+| `Jwt__Algorithm` | `HS256` | no | `HS256` or `RS256` |
 | `Jwt__Issuer` | — | **yes** | Expected `iss` claim — your AS's issuer URL |
 | `Jwt__Audience` | `obsidian` | no | Expected `aud` claim |
-| `Jwt__SigningKey__Current` | — | **yes** | HS256 signing key, shared with your AS |
-| `Jwt__SigningKey__Previous` | — | no | Previous key during rotation window |
+| `Jwt__SigningKey__Current` | — | HS256 only | HS256 signing key, shared with your AS |
+| `Jwt__SigningKey__Previous` | — | no | Previous HS256 key during rotation window |
 | `Mcp__OAuthDiscovery__Issuer` | — | **yes** | `/.well-known/oauth-authorization-server` `issuer` field |
 | `Mcp__OAuthDiscovery__AuthorizationEndpoint` | — | **yes** | Your AS's `/authorize` URL |
 | `Mcp__OAuthDiscovery__TokenEndpoint` | — | **yes** | Your AS's `/token` URL |
@@ -135,6 +141,35 @@ builds and pushes the image. It expects these repository Variables / Secrets:
 - `vars.REGISTRY` — registry hostname (e.g. `ghcr.io`)
 - `vars.IMAGE_OWNER` — registry owner/namespace
 - `secrets.PACKAGES_TOKEN` — registry push token
+
+## Choosing an AS
+
+Claude.ai chat enforces the full OAuth Authorization Code + PKCE flow against
+your MCP server's `/.well-known/oauth-authorization-server` endpoint — there
+is no bearer-token shortcut. Pick one of these paths:
+
+**Hosted (fastest start, recommended for new setups)** — RS256 mode:
+
+| Provider | Free tier | Notes |
+|---|---|---|
+| [Logto Cloud](https://logto.io) | 5000 MAU | Lightest, ~30 min setup |
+| [ZITADEL Cloud](https://zitadel.com) | 25k auths/month | More featureful, slightly heavier docs |
+
+Set `Jwt__Algorithm=RS256` and `Jwt__Issuer=<your-tenant-issuer-URL>`.
+Public keys are fetched automatically from `<Issuer>/.well-known/openid-configuration`.
+
+**Self-hosted, full-featured** — RS256 mode:
+[Keycloak](https://www.keycloak.org), [ZITADEL](https://github.com/zitadel/zitadel), [Logto](https://github.com/logto-io/logto), [Authentik](https://goauthentik.io).
+
+**Self-hosted, minimal** — HS256 mode:
+Write your own ~500 LoC AS that issues HS256 JWTs with the right claims. The
+MCP server's `Jwt__SigningKey__Current` and the AS's signing key must match.
+
+**Required AS features regardless of choice:**
+- OAuth 2.1 + PKCE (RFC 7636)
+- Dynamic Client Registration (RFC 7591) — so Claude.ai can self-register
+- `resource` parameter support (RFC 8707) — for audience-bound tokens
+- Custom scope support (`read:obsidian`, `write:obsidian`)
 
 ## Running tests
 
