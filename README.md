@@ -1,5 +1,7 @@
 # obsidian-mcp
 
+English | [简体中文](README.zh-CN.md)
+
 Read and write an Obsidian vault via [MCP (Model Context Protocol)](https://modelcontextprotocol.io/),
 gated by OAuth-issued JWT bearer tokens.
 
@@ -162,8 +164,7 @@ Public keys are fetched automatically from `<Issuer>/.well-known/openid-configur
 [Keycloak](https://www.keycloak.org), [ZITADEL](https://github.com/zitadel/zitadel), [Logto](https://github.com/logto-io/logto), [Authentik](https://goauthentik.io).
 
 **Self-hosted, minimal** — HS256 mode:
-Write your own ~500 LoC AS that issues HS256 JWTs with the right claims. The
-MCP server's `Jwt__SigningKey__Current` and the AS's signing key must match.
+See [nas-auth](https://github.com/ZhengchenTao/nas-auth) — the reference ~500 LoC AS this server was developed against. Or write your own. The MCP server's `Jwt__SigningKey__Current` and the AS's signing key must match.
 
 **Required AS features regardless of choice:**
 - OAuth 2.1 + PKCE (RFC 7636)
