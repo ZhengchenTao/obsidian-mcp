@@ -27,7 +27,8 @@ obsidian-mcp /mcp
     │  VaultWriteGuard   — whitelist for writes
     │
     ▼
-/vault  (mounted directory — local folder, WebDAV sync target, etc.)
+/vault  (任意挂载目录 —— 本地文件夹 / WebDAV / NFS / SMB 同步目标皆可。
+         本服务只读写本地路径,不实现任何同步协议。)
 ```
 
 ## MCP tools
