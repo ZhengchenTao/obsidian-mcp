@@ -8,7 +8,7 @@ namespace ObsidianMcp.Tools;
 
 [McpServerToolType]
 public class WriteFileTool(
-    VaultWriteGuard guard,
+    VaultPathResolver resolver,
     AuditLogger audit,
     IHttpContextAccessor http)
 {
@@ -16,14 +16,10 @@ public class WriteFileTool(
     [Description(
         "Overwrite a vault file with new content (requires write:obsidian scope). " +
         "Completely replaces the existing content. " +
-        "Only paths matching Vault__WriteWhitelist entries are allowed " +
-        "(entries ending with '/' are prefix matches, otherwise exact-path matches). " +
-        "Agent context files (AGENTS.md, README.md, CLAUDE.md) are always forbidden, " +
-        "as are any paths in Vault__Blacklist. " +
+        "Any vault-relative path is writable except paths whose segment is in Vault__Blacklist. " +
         "Use append_file to add content without overwriting.")]
     public async Task<WriteResult> WriteFile(
-        [Description("Vault-relative path (must be in writable whitelist). " +
-                     "e.g. 'Projects/logs/2026-05.md'")] string path,
+        [Description("Vault-relative path, e.g. 'Projects/logs/2026-05.md'")] string path,
         [Description("Full file content to write (UTF-8). Replaces existing content entirely.")] string content)
     {
         // scope 校验
@@ -35,7 +31,7 @@ public class WriteFileTool(
 
         try
         {
-            absPath = guard.EnsureWritable(path);
+            absPath = resolver.Resolve(path);
 
             // 确保父目录存在
             var dir = Path.GetDirectoryName(absPath)!;

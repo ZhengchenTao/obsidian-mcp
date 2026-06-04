@@ -13,7 +13,4 @@ public class VaultOptions
 
     /// <summary>额外黑名单路径段（与 hardcode 合并），env: Vault__Blacklist__0, __1...</summary>
     public string[] Blacklist { get; set; } = [];
-
-    /// <summary>额外写入白名单前缀（与 hardcode 合并），env: Vault__WriteWhitelist__0...</summary>
-    public string[] WriteWhitelist { get; set; } = [];
 }

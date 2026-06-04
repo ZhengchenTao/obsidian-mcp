@@ -7,7 +7,7 @@ namespace ObsidianMcp.Tools;
 
 [McpServerToolType]
 public class AppendFileTool(
-    VaultWriteGuard guard,
+    VaultPathResolver resolver,
     AuditLogger audit,
     IHttpContextAccessor http)
 {
@@ -16,10 +16,9 @@ public class AppendFileTool(
         "Append text to the end of a vault file (requires write:obsidian scope). " +
         "Automatically prepends a newline if the file is non-empty and does not end with one. " +
         "Ideal for adding entries to a running log or todo file without touching existing content. " +
-        "Same whitelist restrictions as write_file apply (path must be in Vault__WriteWhitelist).")]
+        "Same path restrictions as write_file apply (any path except Vault__Blacklist segments).")]
     public async Task<WriteResult> AppendFile(
-        [Description("Vault-relative path (must be in writable whitelist). " +
-                     "e.g. 'Notes/todo.md', 'Projects/logs/2026-05.md'")] string path,
+        [Description("Vault-relative path, e.g. 'Notes/todo.md', 'Projects/logs/2026-05.md'")] string path,
         [Description("Text to append (UTF-8). A newline is automatically inserted before this text " +
                      "if the file does not already end with one.")] string content)
     {
@@ -31,7 +30,7 @@ public class AppendFileTool(
 
         try
         {
-            var absPath = guard.EnsureWritable(path);
+            var absPath = resolver.Resolve(path);
 
             // 确保父目录存在
             var dir = Path.GetDirectoryName(absPath)!;

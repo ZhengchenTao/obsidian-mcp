@@ -25,8 +25,7 @@ MCP client (Claude.ai, etc.)
     ▼
 obsidian-mcp /mcp
     │  JWT verify (HS256, shared key with AS)
-    │  VaultPathResolver — chroot + blacklist
-    │  VaultWriteGuard   — whitelist for writes
+    │  VaultPathResolver — chroot + blacklist (gates reads and writes alike)
     │
     ▼
 /vault  (any mounted directory — local folder / WebDAV / NFS / SMB sync target.
@@ -42,8 +41,8 @@ obsidian-mcp /mcp
 | `read_file` | `read:obsidian` | File content (UTF-8), with optional byte-range params |
 | `search` | `read:obsidian` | Literal substring search, glob-filterable |
 | `get_metadata` | `read:obsidian` | Size, modified_at, has_frontmatter |
-| `write_file` | `write:obsidian` | Overwrite a whitelisted file |
-| `append_file` | `write:obsidian` | Append to a whitelisted file |
+| `write_file` | `write:obsidian` | Overwrite any file outside the blacklist |
+| `append_file` | `write:obsidian` | Append to any file outside the blacklist |
 
 ## Configuration
 
@@ -53,8 +52,7 @@ prefixes (double underscore = nested section). Production values must be injecte
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `Vault__Root` | `/vault` | yes | Vault root directory inside the container |
-| `Vault__Blacklist__0` | — | no | Extra path segments to deny (`.obsidian`, `.trash`, `.git` are always denied) |
-| `Vault__WriteWhitelist__0` | — | for write tools | Writable path entries (see below) |
+| `Vault__Blacklist__0` | — | no | Extra path segments to deny for both reads and writes (`.obsidian`, `.trash`, `.git` are always denied) |
 | `Jwt__Algorithm` | `HS256` | no | `HS256` or `RS256` |
 | `Jwt__Issuer` | — | **yes** | Expected `iss` claim — your AS's issuer URL |
 | `Jwt__Audience` | `obsidian` | no | Expected `aud` claim |
@@ -68,18 +66,12 @@ prefixes (double underscore = nested section). Production values must be injecte
 | `AuditLog__Directory` | `/app/logs` | no | Directory for audit log files |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | no | `Development` for verbose logs |
 
-### Write whitelist format
+### Write access
 
-`Vault__WriteWhitelist__N` entries gate every write/append operation:
-
-- Ending with `/` (or `\`) → prefix match. Example: `Notes/` allows any path under `Notes/`.
-- Otherwise → exact path match. Example: `todo.md` allows only that one file.
-
-Always forbidden regardless of whitelist: any path whose filename is `AGENTS.md`,
-`README.md`, or `CLAUDE.md` (these are common agent-context files; mutating them
-tends to confuse downstream tooling).
-
-If `WriteWhitelist` is empty, all writes are denied.
+Writes (`write_file` / `append_file`) are allowed anywhere reads are: the only
+gate is `Vault__Blacklist` plus path-safety (no traversal, no absolute paths, no
+symlinks). To keep a directory fully off-limits for both reads and writes — e.g. a
+secrets folder — add its segment to `Vault__Blacklist__N`.
 
 ## Local development
 
@@ -90,7 +82,6 @@ echo "# Test" > test-vault/Notes/test.md
 
 # 2. Set required env vars
 export Vault__Root=./test-vault
-export Vault__WriteWhitelist__0=Notes/
 export Jwt__Issuer=https://your-auth-server.example.com
 export Jwt__Audience=obsidian
 export Jwt__SigningKey__Current=dev-secret-key-at-least-32-chars-long
@@ -134,7 +125,7 @@ docker run --rm -p 8080:8080 \
   -e Mcp__OAuthDiscovery__Issuer=https://your-auth-server.example.com \
   -e Mcp__OAuthDiscovery__AuthorizationEndpoint=https://your-auth-server.example.com/authorize \
   -e Mcp__OAuthDiscovery__TokenEndpoint=https://your-auth-server.example.com/token \
-  -e Vault__WriteWhitelist__0=Notes/ \
+  -e Vault__Blacklist__0=01-Secret \
   obsidian-mcp
 ```
 

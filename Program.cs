@@ -51,7 +51,6 @@ builder.Services.AddMcpServer()
 // ─── 业务服务 ────────────────────────────────────────────────────────────────
 
 builder.Services.AddSingleton<VaultPathResolver>();
-builder.Services.AddSingleton<VaultWriteGuard>();
 builder.Services.AddSingleton<VaultSearchService>();
 builder.Services.AddSingleton<AuditLogger>();
 

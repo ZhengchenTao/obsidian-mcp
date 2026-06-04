@@ -28,7 +28,6 @@ public class VaultPathResolverTests : IDisposable
         {
             Root = _tempRoot,
             Blacklist = ["custom-black"],
-            WriteWhitelist = [],
         });
         _resolver = new VaultPathResolver(opts);
     }

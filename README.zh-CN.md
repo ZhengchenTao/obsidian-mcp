@@ -23,8 +23,7 @@ MCP client (Claude.ai, etc.)
     ▼
 obsidian-mcp /mcp
     │  JWT verify (HS256, shared key with AS)
-    │  VaultPathResolver — chroot + blacklist
-    │  VaultWriteGuard   — whitelist for writes
+    │  VaultPathResolver — chroot + blacklist (读写共用同一道门禁)
     │
     ▼
 /vault  (任意挂载目录 —— 本地文件夹 / WebDAV / NFS / SMB 同步目标皆可。
@@ -40,8 +39,8 @@ obsidian-mcp /mcp
 | `read_file` | `read:obsidian` | 读取文件内容（UTF-8，可选 byte-range 参数） |
 | `search` | `read:obsidian` | 纯字符串子串搜索，可用 glob 过滤 |
 | `get_metadata` | `read:obsidian` | size、modified_at、has_frontmatter |
-| `write_file` | `write:obsidian` | 覆盖写一个 whitelist 内的文件 |
-| `append_file` | `write:obsidian` | 在 whitelist 内的文件末尾追加 |
+| `write_file` | `write:obsidian` | 覆盖写任意非黑名单文件 |
+| `append_file` | `write:obsidian` | 在任意非黑名单文件末尾追加 |
 
 ## Configuration
 
@@ -50,8 +49,7 @@ obsidian-mcp /mcp
 | 变量 | 默认值 | 必填 | 说明 |
 |---|---|---|---|
 | `Vault__Root` | `/vault` | 是 | 容器内的 vault 根目录 |
-| `Vault__Blacklist__0` | — | 否 | 额外要拒绝的路径片段（`.obsidian`、`.trash`、`.git` 始终被拒） |
-| `Vault__WriteWhitelist__0` | — | 写工具需要 | 可写路径项（见下方） |
+| `Vault__Blacklist__0` | — | 否 | 额外要拒绝的路径片段，读写都挡（`.obsidian`、`.trash`、`.git` 始终被拒） |
 | `Jwt__Algorithm` | `HS256` | 否 | `HS256` 或 `RS256` |
 | `Jwt__Issuer` | — | **是** | 期望的 `iss` claim —— 你 AS 的 issuer URL |
 | `Jwt__Audience` | `obsidian` | 否 | 期望的 `aud` claim |
@@ -65,16 +63,11 @@ obsidian-mcp /mcp
 | `AuditLog__Directory` | `/app/logs` | 否 | 审计日志目录 |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | 否 | `Development` 启用详细日志 |
 
-### Write whitelist format
+### 写入门禁
 
-`Vault__WriteWhitelist__N` 每一项都对 write / append 操作起 gate 作用：
-
-- 以 `/`（或 `\`）结尾 → 前缀匹配。例如 `Notes/` 允许 `Notes/` 下任意路径。
-- 否则 → 精确路径匹配。例如 `todo.md` 仅允许这一个文件。
-
-无论 whitelist 如何，以下文件名永远禁止写入：`AGENTS.md`、`README.md`、`CLAUDE.md`（这些是常见的 agent context 文件，被改写后容易让下游工具混乱）。
-
-`WriteWhitelist` 为空时，所有写操作都被拒绝。
+写入（`write_file` / `append_file`）和读取走同一道门禁：只受 `Vault__Blacklist`
+加路径安全（禁穿越、禁绝对路径、禁 symlink）约束，命中黑名单以外的任意路径都能写。
+想让某个目录读写双禁（例如密码目录），把它的路径段加进 `Vault__Blacklist__N` 即可。
 
 ## Local development
 
@@ -85,7 +78,6 @@ echo "# Test" > test-vault/Notes/test.md
 
 # 2. 设置必要的环境变量
 export Vault__Root=./test-vault
-export Vault__WriteWhitelist__0=Notes/
 export Jwt__Issuer=https://your-auth-server.example.com
 export Jwt__Audience=obsidian
 export Jwt__SigningKey__Current=dev-secret-key-at-least-32-chars-long
@@ -129,7 +121,7 @@ docker run --rm -p 8080:8080 \
   -e Mcp__OAuthDiscovery__Issuer=https://your-auth-server.example.com \
   -e Mcp__OAuthDiscovery__AuthorizationEndpoint=https://your-auth-server.example.com/authorize \
   -e Mcp__OAuthDiscovery__TokenEndpoint=https://your-auth-server.example.com/token \
-  -e Vault__WriteWhitelist__0=Notes/ \
+  -e Vault__Blacklist__0=01-Secret \
   obsidian-mcp
 ```
 
