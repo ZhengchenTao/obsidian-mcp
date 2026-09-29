@@ -2,171 +2,134 @@
 
 [English](README.md) | 简体中文
 
-通过 [MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 协议读写 Obsidian vault，访问由 OAuth 签发的 JWT bearer token 控制。
+一个 [MCP](https://modelcontextprotocol.io/) 服务，让 AI 客户端读写 Obsidian 笔记库里的笔记。它直接操作挂载进来的目录里的普通文件，笔记库怎么同步（WebDAV、Syncthing、NAS 共享……）都无所谓；它只认 OAuth access token，所以能像其他远程连接器一样加到 Claude、ChatGPT、Cursor 里。
 
-本 server 可对接任何能签发包含 `aud` / `iss` / `sub` / `scope` claim 的 OAuth 2.1 + PKCE AS。支持两种签名模式：
+## 三个仓怎么配合
 
-- **HS256**（默认）—— AS 与本 server 共享对称密钥。用于自建的极简 AS。
-- **RS256** —— 自动通过 `<Issuer>/.well-known/openid-configuration` 的 OIDC discovery 拉取 JWKS。可对接任意标准 provider：[Logto](https://logto.io)、[ZITADEL](https://zitadel.com)、[Keycloak](https://www.keycloak.org)、[Auth0](https://auth0.com) 等。
+- [nas-auth](https://github.com/ZhengchenTao/nas-auth)：授权服务，负责登录和签发 token。
+- [obsidian-mcp](https://github.com/ZhengchenTao/obsidian-mcp)：Obsidian 笔记库的 MCP 服务（可读写）。
+- [gitea-mcp](https://github.com/ZhengchenTao/gitea-mcp)：Gitea 的 MCP 服务（只读）。
 
-部署指引见下方 [Choosing an AS](#choosing-an-as)。
+MCP 客户端从 MCP 服务的元数据里找到授权服务，自己注册，让用户登录，拿到一个只对这一个 MCP 服务有效的 token。MCP 服务用 nas-auth 公布的公钥验 token，碰不到密码，也不需要和谁共享密钥。三个仓也可以单独用：两个 MCP 服务能接任何标准的 OAuth 服务，nas-auth 也能给任何会验 JWT 的服务做登录。
 
-## Architecture
+## 请求怎么进来
 
 ```
-MCP client (Claude.ai, etc.)
-    │
-    │ ① GET /.well-known/oauth-authorization-server  (RFC 8414)
-    │ ② OAuth Authorization Code + PKCE  (against your AS)
-    │ ③ Bearer JWT (aud=obsidian, scope=read:obsidian | write:obsidian)
-    │
+MCP 客户端（Claude、ChatGPT、Cursor …）
+    │ 1. GET /.well-known/oauth-protected-resource   → 该找哪个授权服务
+    │ 2. OAuth 授权码 + PKCE                           （对那个授权服务）
+    │ 3. POST /mcp，带 Bearer <JWT>（aud=obsidian，scope 为 read:obsidian / write:obsidian）
     ▼
-obsidian-mcp /mcp
-    │  JWT verify (HS256, shared key with AS)
-    │  VaultPathResolver — chroot + blacklist (读写共用同一道门禁)
-    │
+obsidian-mcp
+    │ 验 JWT（RS256 走 JWKS，或 HS256 共享密钥）
+    │ 所有路径都解析在笔记库根目录内，再过黑名单
     ▼
-/vault  (任意挂载目录 —— 本地文件夹 / WebDAV / NFS / SMB 同步目标皆可。
-         本服务只读写本地路径,不实现任何同步协议。)
+/vault（任意挂载目录）
 ```
 
-## MCP tools
+## 工具
 
-| 工具 | 所需 scope | 说明 |
+| 工具 | scope | |
 |---|---|---|
-| `list_vault_tree` | `read:obsidian` | 限定深度的 vault 目录树 |
-| `list_files` | `read:obsidian` | 列出某个目录下的文件与子目录 |
-| `read_file` | `read:obsidian` | 读取文件内容（UTF-8，可选 byte-range 参数） |
-| `search` | `read:obsidian` | 纯字符串子串搜索，可用 glob 过滤 |
-| `get_metadata` | `read:obsidian` | size、modified_at、has_frontmatter |
-| `write_file` | `write:obsidian` | 覆盖写任意非黑名单文件 |
-| `append_file` | `write:obsidian` | 在任意非黑名单文件末尾追加 |
+| `list_vault_tree` | `read:obsidian` | 目录树，限深度 |
+| `list_files` | `read:obsidian` | 某个目录下的文件和文件夹 |
+| `read_file` | `read:obsidian` | 文件内容（UTF-8）；大文件可用 `offset` / `limit`（字节） |
+| `search` | `read:obsidian` | 纯文本子串搜索，可加 glob 过滤 |
+| `get_metadata` | `read:obsidian` | 大小、修改时间、有没有 front matter |
+| `write_file` | `write:obsidian` | 新建或覆盖文件 |
+| `append_file` | `write:obsidian` | 往文件末尾追加 |
 
-## Configuration
+能读的地方就能写，限制只有黑名单和路径安全：不许 `..`、不许绝对路径、拒绝符号链接。`.obsidian`、`.trash`、`.git` 始终隐藏。想让某个文件夹（比如放密码的）彻底碰不到，加进 `Vault__Blacklist__N`。
 
-所有配置项通过 `Vault__` / `Jwt__` / `Mcp__OAuthDiscovery__` 前缀绑定（double underscore 表示嵌套 section）。生产环境必须通过环境变量注入。
+## 配置
 
-| 变量 | 默认值 | 必填 | 说明 |
-|---|---|---|---|
-| `Vault__Root` | `/vault` | 是 | 容器内的 vault 根目录 |
-| `Vault__Blacklist__0` | — | 否 | 额外要拒绝的路径片段，读写都挡（`.obsidian`、`.trash`、`.git` 始终被拒） |
-| `Jwt__Algorithm` | `HS256` | 否 | `HS256` 或 `RS256` |
-| `Jwt__Issuer` | — | **是** | 期望的 `iss` claim —— 你 AS 的 issuer URL |
-| `Jwt__Audience` | `obsidian` | 否 | 期望的 `aud` claim |
-| `Jwt__SigningKey__Current` | — | 仅 HS256 | HS256 签名密钥，与你的 AS 共享 |
-| `Jwt__SigningKey__Previous` | — | 否 | 轮换窗口内的旧 HS256 密钥 |
-| `Jwt__ValidTypes__0`、`__1`… | *(空 = 不校验)* | 否 | 仅 RS256：允许的 JWT header `typ`。AS 用同一把钥同时签 id_token 与 access token 时（如 nas-auth）设为 `at+jwt`（RFC 9068），id_token 就无法冒充 access token |
-| `Mcp__OAuthDiscovery__Issuer` | — | **是** | `/.well-known/oauth-authorization-server` 中的 `issuer` 字段 |
-| `Mcp__OAuthDiscovery__AuthorizationEndpoint` | — | **是** | 你 AS 的 `/authorize` URL |
-| `Mcp__OAuthDiscovery__TokenEndpoint` | — | **是** | 你 AS 的 `/token` URL |
-| `Mcp__OAuthDiscovery__RegistrationEndpoint` | — | 否 | 你 AS 的 `/register` URL（DCR） |
-| `Mcp__OAuthDiscovery__ResourceUrl` | request host | 否 | RFC 9728 中本 MCP server 的 `resource` 标识 |
-| `AuditLog__Directory` | `/app/logs` | 否 | 审计日志目录 |
-| `ASPNETCORE_ENVIRONMENT` | `Production` | 否 | `Development` 启用详细日志 |
+用环境变量，`__` 表示层级。
 
-### 写入门禁
+| 变量 | 默认值 | |
+|---|---|---|
+| `Vault__Root` | `/vault` | 容器内的笔记库目录 |
+| `Vault__Blacklist__N` | – | 额外要隐藏的路径段，读写都禁 |
+| `Jwt__Algorithm` | `HS256` | `RS256`（从 issuer 的 JWKS 取公钥）或 `HS256`（共享密钥） |
+| `Jwt__Issuer` | – | 期望的 `iss`，必填。RS256 模式从 `<Issuer>/.well-known/openid-configuration` 拉公钥。 |
+| `Jwt__Audience` | `obsidian` | 期望的 `aud` |
+| `Jwt__ValidTypes__N` | – | 仅 RS256：允许的 `typ` 头。对接 nas-auth 设 `at+jwt`，因为它的 id_token 用的是同一把钥。留空不检查，兼容 token 里写 `typ: JWT` 的服务。 |
+| `Jwt__SigningKey__Current` / `__Previous` | – | 仅 HS256：和授权服务共享的密钥，以及轮换期间的上一把 |
+| `Mcp__OAuthDiscovery__Issuer` | – | 必填，写进本服务的 OAuth 元数据 |
+| `Mcp__OAuthDiscovery__AuthorizationEndpoint` | – | 必填 |
+| `Mcp__OAuthDiscovery__TokenEndpoint` | – | 必填 |
+| `Mcp__OAuthDiscovery__RegistrationEndpoint` | – | 授权服务的 `/register`，支持动态注册时填 |
+| `Mcp__OAuthDiscovery__ResourceUrl` | 请求的 host | RFC 9728 的 `resource`，要和授权服务那边一致 |
+| `AuditLog__Directory` | `/app/logs` | 审计日志，一天一个文件 |
 
-写入（`write_file` / `append_file`）和读取走同一道门禁：只受 `Vault__Blacklist`
-加路径安全（禁穿越、禁绝对路径、禁 symlink）约束，命中黑名单以外的任意路径都能写。
-想让某个目录读写双禁（例如密码目录），把它的路径段加进 `Vault__Blacklist__N` 即可。
+对接 nas-auth 就是这些：
 
-## Local development
-
-```bash
-# 1. 建一个测试 vault
-mkdir -p test-vault/Notes
-echo "# Test" > test-vault/Notes/test.md
-
-# 2. 设置必要的环境变量
-export Vault__Root=./test-vault
-export Jwt__Issuer=https://your-auth-server.example.com
-export Jwt__Audience=obsidian
-export Jwt__SigningKey__Current=dev-secret-key-at-least-32-chars-long
-export Mcp__OAuthDiscovery__Issuer=https://your-auth-server.example.com
-export Mcp__OAuthDiscovery__AuthorizationEndpoint=https://your-auth-server.example.com/authorize
-export Mcp__OAuthDiscovery__TokenEndpoint=https://your-auth-server.example.com/token
-
-# 3. 跑起来
-dotnet run
-
-# 4. 生成测试用 JWT（需要 dotnet user-jwts）
-dotnet user-jwts create \
-    --issuer https://your-auth-server.example.com \
-    --audience obsidian \
-    --name tester \
-    --claim sub=tester \
-    --claim scope="read:obsidian write:obsidian"
-
-# 5. 用 MCP Inspector 测试
-npx @modelcontextprotocol/inspector
-# Transport: Streamable HTTP
-# URL: http://localhost:5000/mcp
-# Bearer Token: <粘贴步骤 4 得到的 JWT>
+```
+Jwt__Algorithm=RS256
+Jwt__Issuer=https://auth.example.com
+Jwt__ValidTypes__0=at+jwt
+Mcp__OAuthDiscovery__Issuer=https://auth.example.com
+Mcp__OAuthDiscovery__AuthorizationEndpoint=https://auth.example.com/authorize
+Mcp__OAuthDiscovery__TokenEndpoint=https://auth.example.com/token
+Mcp__OAuthDiscovery__RegistrationEndpoint=https://auth.example.com/register
+Mcp__OAuthDiscovery__ResourceUrl=https://obsidian-mcp.example.com
 ```
 
-## Docker
+再在 nas-auth 的 `resources.json` 里加一个 `obsidian` 条目，`resource_url` 填同一个地址。
 
-仓库内附 multi-stage Dockerfile。本地构建：
+## 用哪个授权服务
+
+Claude 这类远程连接器客户端只走完整的 OAuth 流程：从本服务的元数据发现授权服务，授权码 + PKCE，没有「直接贴一个 token」的选项。所以授权服务得支持 PKCE、动态客户端注册（客户端要自己注册）、`resource` 参数（RFC 8707）和自定义 scope（`read:obsidian`、`write:obsidian`）。
+
+- [nas-auth](https://github.com/ZhengchenTao/nas-auth)：本服务就是照着它写的。小，自建，按上面的 RS256 配置即可。
+- 托管服务：[Logto](https://logto.io)、[ZITADEL](https://zitadel.com)、[Auth0](https://auth0.com)。用 RS256 模式，填租户的 issuer 地址。
+- 自建、功能更全：[Keycloak](https://www.keycloak.org)、[Authentik](https://goauthentik.io)，或者自己部署 ZITADEL / Logto。
+- HS256 模式留给你自己写的极简授权服务，两边要用同一把密钥。
+
+## 运行
 
 ```bash
 docker build -t obsidian-mcp .
-```
 
-挂载 vault 后运行：
-
-```bash
 docker run --rm -p 8080:8080 \
   -v /path/to/vault:/vault \
-  -e Jwt__Issuer=https://your-auth-server.example.com \
-  -e Jwt__SigningKey__Current=$JWT_SIGNING_KEY \
-  -e Mcp__OAuthDiscovery__Issuer=https://your-auth-server.example.com \
-  -e Mcp__OAuthDiscovery__AuthorizationEndpoint=https://your-auth-server.example.com/authorize \
-  -e Mcp__OAuthDiscovery__TokenEndpoint=https://your-auth-server.example.com/token \
-  -e Vault__Blacklist__0=01-Secret \
+  -e Jwt__Algorithm=RS256 \
+  -e Jwt__Issuer=https://auth.example.com \
+  -e Jwt__ValidTypes__0=at+jwt \
+  -e Mcp__OAuthDiscovery__Issuer=https://auth.example.com \
+  -e Mcp__OAuthDiscovery__AuthorizationEndpoint=https://auth.example.com/authorize \
+  -e Mcp__OAuthDiscovery__TokenEndpoint=https://auth.example.com/token \
+  -e Vault__Blacklist__0=Private \
   obsidian-mcp
 ```
 
-仓库内的 `.gitea/workflows/build-image.yml` 是 Gitea Actions 工作流：构建镜像，推成 `<REGISTRY>/<IMAGE_OWNER>/obsidian-mcp:<短 sha>` 与 `:latest`，然后可选地经 SSH 触发重新部署。需要这些仓库 Variables / Secrets：
+要用 `write_file` / `append_file`，容器用户得对笔记库有写权限；不需要写就挂成只读（`:ro`）。
 
-- `vars.REGISTRY` —— registry 主机名（例如 Gitea Container Registry 的 `git.example.com`）
-- `vars.IMAGE_OWNER` —— registry 下的 owner / 命名空间（也是登录用户名）
-- `secrets.AIFACELY_REGISTRY_TOKEN` —— registry 推送 token（`write:package`）
-- `vars.DEPLOY_SERVICE` —— *（可选）* 以 `deploy <service>` 传给部署主机的服务名；留空则只构建、推送
-- `secrets.NAS_CI_SSH_KEY`、`secrets.NAS_SSH_HOST`、`secrets.NAS_SSH_KNOWN_HOSTS` —— 仅配了 `DEPLOY_SERVICE` 时需要：SSH 私钥（在目标机上限定为强制部署命令）、主机、固定的 host key 行
-
-工作流里的 action 引用与构建代理指向作者自己的 CI 环境，fork 后请自行调整。
-
-## Choosing an AS
-
-Claude.ai 网页端强制走完整的 OAuth Authorization Code + PKCE 流程，对接你 MCP server 的 `/.well-known/oauth-authorization-server` 端点 —— 没有 bearer token 捷径可用。在下面几条路径中选一条：
-
-**Hosted (fastest start, recommended for new setups)** —— RS256 模式：
-
-| Provider | 免费额度 | 备注 |
-|---|---|---|
-| [Logto Cloud](https://logto.io) | 5000 MAU | 最轻量，约 30 分钟搭好 |
-| [ZITADEL Cloud](https://zitadel.com) | 25k auths / 月 | 功能更全，文档稍重 |
-
-设置 `Jwt__Algorithm=RS256` 与 `Jwt__Issuer=<你的 tenant issuer URL>`。公钥会自动从 `<Issuer>/.well-known/openid-configuration` 拉取。
-
-**Self-hosted, full-featured** —— RS256 模式：
-[Keycloak](https://www.keycloak.org)、[ZITADEL](https://github.com/zitadel/zitadel)、[Logto](https://github.com/logto-io/logto)、[Authentik](https://goauthentik.io)。
-
-**Self-hosted, minimal** —— [nas-auth](https://github.com/ZhengchenTao/nas-auth)，本 server 开发时对接的小型 AS（DCR + PKCE + RFC 8707/9728）。用 RS256 模式：`Jwt__Issuer=<nas-auth 的 issuer>`，并设 `Jwt__ValidTypes__0=at+jwt`。HS256 模式（共享对称密钥，`Jwt__SigningKey__Current` 须与 AS 一致）仍保留给自建的极简 AS。
-
-**不论选哪条，AS 必须支持：**
-- OAuth 2.1 + PKCE（RFC 7636）
-- Dynamic Client Registration（RFC 7591）—— 让 Claude.ai 能自助注册
-- `resource` 参数（RFC 8707）—— 用于签发 audience-bound token
-- 自定义 scope 支持（`read:obsidian`、`write:obsidian`）
-
-## Running tests
+本地开发用 HS256、自己签一个 token 最省事：
 
 ```bash
-cd obsidian-mcp.Tests
-dotnet test
+mkdir -p test-vault/Notes && echo "# Test" > test-vault/Notes/test.md
+
+export Vault__Root=./test-vault
+export Jwt__Issuer=https://auth.example.com
+export Jwt__SigningKey__Current=dev-secret-key-at-least-32-chars-long
+export Mcp__OAuthDiscovery__Issuer=https://auth.example.com
+export Mcp__OAuthDiscovery__AuthorizationEndpoint=https://auth.example.com/authorize
+export Mcp__OAuthDiscovery__TokenEndpoint=https://auth.example.com/token
+dotnet run
+
+dotnet user-jwts create --issuer https://auth.example.com --audience obsidian \
+  --name tester --claim sub=tester --claim scope="read:obsidian write:obsidian"
+
+npx @modelcontextprotocol/inspector
+# 选 Streamable HTTP，地址 http://localhost:5000/mcp，把 token 填进 Bearer
 ```
 
-## License
+测试：`dotnet test obsidian-mcp.Tests`。
+
+## CI
+
+`.gitea/workflows/build-image.yml` 在每次推送到 `main` 时构建并推送 `<REGISTRY>/<IMAGE_OWNER>/obsidian-mcp`，然后可以经 SSH 触发重新部署。用到 `vars.REGISTRY`、`vars.IMAGE_OWNER`、`secrets.AIFACELY_REGISTRY_TOKEN`，部署步骤另外用 `vars.DEPLOY_SERVICE`、`secrets.NAS_CI_SSH_KEY`、`secrets.NAS_SSH_HOST`、`secrets.NAS_SSH_KNOWN_HOSTS`。里面的 action 地址和构建代理是按我自己的 CI 写的，fork 后改成你的。
+
+## 许可
 
 MIT

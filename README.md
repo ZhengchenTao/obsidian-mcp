@@ -2,185 +2,164 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Read and write an Obsidian vault via [MCP (Model Context Protocol)](https://modelcontextprotocol.io/),
-gated by OAuth-issued JWT bearer tokens.
+An [MCP](https://modelcontextprotocol.io/) server that lets an AI client read
+and write the notes in an Obsidian vault. It works on plain files in a mounted
+directory, so it doesn't care how the vault is synced (WebDAV, Syncthing, a
+NAS share…), and it only accepts OAuth access tokens, so you can add it to
+Claude, ChatGPT or Cursor like any other remote connector.
 
-This server pairs with any OAuth 2.1 + PKCE authorization server that can mint
-JWTs containing `aud`, `iss`, `sub`, `scope` claims. Two signing modes:
+## How the three repos fit together
 
-- **HS256** (default) — shared symmetric key between AS and this server. Use for self-built minimal AS.
-- **RS256** — fetches JWKS automatically via OIDC discovery from `<Issuer>/.well-known/openid-configuration`. Use with any standard provider: [Logto](https://logto.io), [ZITADEL](https://zitadel.com), [Keycloak](https://www.keycloak.org), [Auth0](https://auth0.com), etc.
+- [nas-auth](https://github.com/ZhengchenTao/nas-auth): the authorization
+  server. Signs users in and issues tokens.
+- [obsidian-mcp](https://github.com/ZhengchenTao/obsidian-mcp): MCP server for
+  an Obsidian vault (read and write).
+- [gitea-mcp](https://github.com/ZhengchenTao/gitea-mcp): MCP server for a
+  Gitea instance (read-only).
 
-See [Choosing an AS](#choosing-an-as) below for setup guidance.
+An MCP client finds the authorization server through the MCP server's
+metadata, registers itself, lets the user sign in, and gets a token that is
+only valid for that one MCP server. The MCP servers check the token against
+nas-auth's public keys. They never see a password or a shared secret. Each
+repo also works on its own: the MCP servers accept tokens from any standard
+OAuth server, and nas-auth can front any service that verifies JWTs.
 
-## Architecture
+## How a request gets in
 
 ```
-MCP client (Claude.ai, etc.)
-    │
-    │ ① GET /.well-known/oauth-authorization-server  (RFC 8414)
-    │ ② OAuth Authorization Code + PKCE  (against your AS)
-    │ ③ Bearer JWT (aud=obsidian, scope=read:obsidian | write:obsidian)
-    │
+MCP client (Claude, ChatGPT, Cursor …)
+    │ 1. GET /.well-known/oauth-protected-resource   → which auth server to use
+    │ 2. OAuth authorization code + PKCE              (against that server)
+    │ 3. POST /mcp with Bearer <JWT>  (aud=obsidian, scope read:obsidian / write:obsidian)
     ▼
-obsidian-mcp /mcp
-    │  JWT verify (HS256, shared key with AS)
-    │  VaultPathResolver — chroot + blacklist (gates reads and writes alike)
-    │
+obsidian-mcp
+    │ checks the JWT (RS256 via JWKS, or an HS256 shared key)
+    │ resolves every path inside the vault root, applies the blacklist
     ▼
-/vault  (any mounted directory — local folder / WebDAV / NFS / SMB sync target.
-         the server only reads & writes local paths; it does not speak any sync protocol.)
+/vault   (any mounted directory)
 ```
 
-## MCP tools
+## Tools
 
-| Tool | Scope required | Description |
+| Tool | Scope | |
 |---|---|---|
-| `list_vault_tree` | `read:obsidian` | Depth-limited directory tree of the vault |
-| `list_files` | `read:obsidian` | Files and subdirs in a directory |
-| `read_file` | `read:obsidian` | File content (UTF-8), with optional byte-range params |
-| `search` | `read:obsidian` | Literal substring search, glob-filterable |
-| `get_metadata` | `read:obsidian` | Size, modified_at, has_frontmatter |
-| `write_file` | `write:obsidian` | Overwrite any file outside the blacklist |
-| `append_file` | `write:obsidian` | Append to any file outside the blacklist |
+| `list_vault_tree` | `read:obsidian` | Directory tree, depth-limited |
+| `list_files` | `read:obsidian` | Files and folders in one directory |
+| `read_file` | `read:obsidian` | File content (UTF-8); `offset` / `limit` in bytes for large files |
+| `search` | `read:obsidian` | Plain substring search, optional glob filter |
+| `get_metadata` | `read:obsidian` | Size, modified time, whether it has front matter |
+| `write_file` | `write:obsidian` | Create or overwrite a file |
+| `append_file` | `write:obsidian` | Append to a file |
+
+Writes are allowed wherever reads are. The limits are the blacklist and path
+safety: no `..`, no absolute paths, symlinks are refused. `.obsidian`,
+`.trash` and `.git` are always hidden. To keep a folder (say, one with
+passwords) out of reach entirely, add it to `Vault__Blacklist__N`.
 
 ## Configuration
 
-All settings are bound from configuration with `Vault__`, `Jwt__`, `Mcp__OAuthDiscovery__`
-prefixes (double underscore = nested section). Production values must be injected via env vars.
+Environment variables, `__` for nesting.
 
-| Variable | Default | Required | Description |
-|---|---|---|---|
-| `Vault__Root` | `/vault` | yes | Vault root directory inside the container |
-| `Vault__Blacklist__0` | — | no | Extra path segments to deny for both reads and writes (`.obsidian`, `.trash`, `.git` are always denied) |
-| `Jwt__Algorithm` | `HS256` | no | `HS256` or `RS256` |
-| `Jwt__Issuer` | — | **yes** | Expected `iss` claim — your AS's issuer URL |
-| `Jwt__Audience` | `obsidian` | no | Expected `aud` claim |
-| `Jwt__SigningKey__Current` | — | HS256 only | HS256 signing key, shared with your AS |
-| `Jwt__SigningKey__Previous` | — | no | Previous HS256 key during rotation window |
-| `Jwt__ValidTypes__0`, `__1`, … | *(empty = no check)* | no | RS256 only: allowed JWT header `typ` values. Set to `at+jwt` (RFC 9068) when your AS signs id_tokens with the same key as access tokens (e.g. nas-auth), so an id_token can never pass as an access token |
-| `Mcp__OAuthDiscovery__Issuer` | — | **yes** | `/.well-known/oauth-authorization-server` `issuer` field |
-| `Mcp__OAuthDiscovery__AuthorizationEndpoint` | — | **yes** | Your AS's `/authorize` URL |
-| `Mcp__OAuthDiscovery__TokenEndpoint` | — | **yes** | Your AS's `/token` URL |
-| `Mcp__OAuthDiscovery__RegistrationEndpoint` | — | no | Your AS's `/register` URL (DCR) |
-| `Mcp__OAuthDiscovery__ResourceUrl` | request host | no | RFC 9728 `resource` identifier for this MCP server |
-| `AuditLog__Directory` | `/app/logs` | no | Directory for audit log files |
-| `ASPNETCORE_ENVIRONMENT` | `Production` | no | `Development` for verbose logs |
+| Variable | Default | |
+|---|---|---|
+| `Vault__Root` | `/vault` | Vault directory inside the container |
+| `Vault__Blacklist__N` | – | Extra path segments to hide from reads and writes |
+| `Jwt__Algorithm` | `HS256` | `RS256` (keys from the issuer's JWKS) or `HS256` (shared key) |
+| `Jwt__Issuer` | – | Expected `iss`. Required. In RS256 mode keys are fetched from `<Issuer>/.well-known/openid-configuration`. |
+| `Jwt__Audience` | `obsidian` | Expected `aud` |
+| `Jwt__ValidTypes__N` | – | RS256 only: allowed `typ` header values. Set `at+jwt` for nas-auth, whose id_tokens share the signing key. Empty means no check, for providers whose tokens say `typ: JWT`. |
+| `Jwt__SigningKey__Current` / `__Previous` | – | HS256 only: the key shared with your auth server, and the previous one during rotation |
+| `Mcp__OAuthDiscovery__Issuer` | – | Required. Published in this server's OAuth metadata. |
+| `Mcp__OAuthDiscovery__AuthorizationEndpoint` | – | Required |
+| `Mcp__OAuthDiscovery__TokenEndpoint` | – | Required |
+| `Mcp__OAuthDiscovery__RegistrationEndpoint` | – | The auth server's `/register`, if it supports dynamic registration |
+| `Mcp__OAuthDiscovery__ResourceUrl` | request host | The RFC 9728 `resource` value. Must match what the auth server expects. |
+| `AuditLog__Directory` | `/app/logs` | One audit log file per day |
 
-### Write access
+With nas-auth that comes down to:
 
-Writes (`write_file` / `append_file`) are allowed anywhere reads are: the only
-gate is `Vault__Blacklist` plus path-safety (no traversal, no absolute paths, no
-symlinks). To keep a directory fully off-limits for both reads and writes — e.g. a
-secrets folder — add its segment to `Vault__Blacklist__N`.
-
-## Local development
-
-```bash
-# 1. Create a test vault
-mkdir -p test-vault/Notes
-echo "# Test" > test-vault/Notes/test.md
-
-# 2. Set required env vars
-export Vault__Root=./test-vault
-export Jwt__Issuer=https://your-auth-server.example.com
-export Jwt__Audience=obsidian
-export Jwt__SigningKey__Current=dev-secret-key-at-least-32-chars-long
-export Mcp__OAuthDiscovery__Issuer=https://your-auth-server.example.com
-export Mcp__OAuthDiscovery__AuthorizationEndpoint=https://your-auth-server.example.com/authorize
-export Mcp__OAuthDiscovery__TokenEndpoint=https://your-auth-server.example.com/token
-
-# 3. Run
-dotnet run
-
-# 4. Generate a test JWT (requires dotnet user-jwts)
-dotnet user-jwts create \
-    --issuer https://your-auth-server.example.com \
-    --audience obsidian \
-    --name tester \
-    --claim sub=tester \
-    --claim scope="read:obsidian write:obsidian"
-
-# 5. Test with MCP Inspector
-npx @modelcontextprotocol/inspector
-# Transport: Streamable HTTP
-# URL: http://localhost:5000/mcp
-# Bearer Token: <paste JWT from step 4>
+```
+Jwt__Algorithm=RS256
+Jwt__Issuer=https://auth.example.com
+Jwt__ValidTypes__0=at+jwt
+Mcp__OAuthDiscovery__Issuer=https://auth.example.com
+Mcp__OAuthDiscovery__AuthorizationEndpoint=https://auth.example.com/authorize
+Mcp__OAuthDiscovery__TokenEndpoint=https://auth.example.com/token
+Mcp__OAuthDiscovery__RegistrationEndpoint=https://auth.example.com/register
+Mcp__OAuthDiscovery__ResourceUrl=https://obsidian-mcp.example.com
 ```
 
-## Docker
+and an `obsidian` entry in nas-auth's `resources.json` with the same
+`resource_url`.
 
-A multi-stage Dockerfile is included. Build locally with:
+## Which auth server
+
+Claude and other remote-connector clients insist on the full OAuth flow:
+authorization code with PKCE, discovered from this server's metadata. There is
+no "paste a token" option. Whatever you use has to support PKCE, dynamic client
+registration (so the client can register itself), the `resource` parameter
+(RFC 8707) and custom scopes (`read:obsidian`, `write:obsidian`).
+
+- [nas-auth](https://github.com/ZhengchenTao/nas-auth) is the one this server
+  was written against. Small, self-hosted, RS256 mode as shown above.
+- Hosted: [Logto](https://logto.io), [ZITADEL](https://zitadel.com),
+  [Auth0](https://auth0.com). Use RS256 mode with your tenant's issuer URL.
+- Self-hosted and bigger: [Keycloak](https://www.keycloak.org),
+  [Authentik](https://goauthentik.io), or ZITADEL / Logto on your own box.
+- HS256 mode is for a minimal auth server you write yourself; it needs the same
+  key on both sides.
+
+## Running it
 
 ```bash
 docker build -t obsidian-mcp .
-```
 
-Run with a mounted vault:
-
-```bash
 docker run --rm -p 8080:8080 \
   -v /path/to/vault:/vault \
-  -e Jwt__Issuer=https://your-auth-server.example.com \
-  -e Jwt__SigningKey__Current=$JWT_SIGNING_KEY \
-  -e Mcp__OAuthDiscovery__Issuer=https://your-auth-server.example.com \
-  -e Mcp__OAuthDiscovery__AuthorizationEndpoint=https://your-auth-server.example.com/authorize \
-  -e Mcp__OAuthDiscovery__TokenEndpoint=https://your-auth-server.example.com/token \
-  -e Vault__Blacklist__0=01-Secret \
+  -e Jwt__Algorithm=RS256 \
+  -e Jwt__Issuer=https://auth.example.com \
+  -e Jwt__ValidTypes__0=at+jwt \
+  -e Mcp__OAuthDiscovery__Issuer=https://auth.example.com \
+  -e Mcp__OAuthDiscovery__AuthorizationEndpoint=https://auth.example.com/authorize \
+  -e Mcp__OAuthDiscovery__TokenEndpoint=https://auth.example.com/token \
+  -e Vault__Blacklist__0=Private \
   obsidian-mcp
 ```
 
-The included `.gitea/workflows/build-image.yml` is a Gitea Actions workflow
-that builds the image, pushes it as `<REGISTRY>/<IMAGE_OWNER>/obsidian-mcp:<short sha>`
-and `:latest`, then optionally triggers a redeploy over SSH. It expects these
-repository Variables / Secrets:
+The container user has to be able to write to the vault if you want
+`write_file` / `append_file`; mount it read-only (`:ro`) if you don't.
 
-- `vars.REGISTRY` — registry hostname (e.g. `git.example.com` for the Gitea
-  Container Registry)
-- `vars.IMAGE_OWNER` — registry owner / namespace (also the login user)
-- `secrets.AIFACELY_REGISTRY_TOKEN` — registry push token (`write:package`)
-- `vars.DEPLOY_SERVICE` — *(optional)* service name passed to the deploy host
-  as `deploy <service>`; leave empty to only build & push
-- `secrets.NAS_CI_SSH_KEY`, `secrets.NAS_SSH_HOST`, `secrets.NAS_SSH_KNOWN_HOSTS`
-  — only needed with `DEPLOY_SERVICE`: the SSH key (restricted on the host to a
-  forced deploy command), the host, and its pinned host key line
-
-The action references and build proxy lines point at the author's CI setup;
-adjust them in a fork.
-
-## Choosing an AS
-
-Claude.ai chat enforces the full OAuth Authorization Code + PKCE flow against
-your MCP server's `/.well-known/oauth-authorization-server` endpoint — there
-is no bearer-token shortcut. Pick one of these paths:
-
-**Hosted (fastest start, recommended for new setups)** — RS256 mode:
-
-| Provider | Free tier | Notes |
-|---|---|---|
-| [Logto Cloud](https://logto.io) | 5000 MAU | Lightest, ~30 min setup |
-| [ZITADEL Cloud](https://zitadel.com) | 25k auths/month | More featureful, slightly heavier docs |
-
-Set `Jwt__Algorithm=RS256` and `Jwt__Issuer=<your-tenant-issuer-URL>`.
-Public keys are fetched automatically from `<Issuer>/.well-known/openid-configuration`.
-
-**Self-hosted, full-featured** — RS256 mode:
-[Keycloak](https://www.keycloak.org), [ZITADEL](https://github.com/zitadel/zitadel), [Logto](https://github.com/logto-io/logto), [Authentik](https://goauthentik.io).
-
-**Self-hosted, minimal** — [nas-auth](https://github.com/ZhengchenTao/nas-auth), the small AS this server was developed against (DCR + PKCE + RFC 8707/9728). Use RS256 mode with `Jwt__Issuer=<nas-auth issuer>` and `Jwt__ValidTypes__0=at+jwt`. HS256 mode (shared symmetric key, `Jwt__SigningKey__Current` must equal the AS's key) remains for self-built minimal servers.
-
-**Required AS features regardless of choice:**
-- OAuth 2.1 + PKCE (RFC 7636)
-- Dynamic Client Registration (RFC 7591) — so Claude.ai can self-register
-- `resource` parameter support (RFC 8707) — for audience-bound tokens
-- Custom scope support (`read:obsidian`, `write:obsidian`)
-
-## Running tests
+For local development it's easiest to use HS256 and mint a token yourself:
 
 ```bash
-cd obsidian-mcp.Tests
-dotnet test
+mkdir -p test-vault/Notes && echo "# Test" > test-vault/Notes/test.md
+
+export Vault__Root=./test-vault
+export Jwt__Issuer=https://auth.example.com
+export Jwt__SigningKey__Current=dev-secret-key-at-least-32-chars-long
+export Mcp__OAuthDiscovery__Issuer=https://auth.example.com
+export Mcp__OAuthDiscovery__AuthorizationEndpoint=https://auth.example.com/authorize
+export Mcp__OAuthDiscovery__TokenEndpoint=https://auth.example.com/token
+dotnet run
+
+dotnet user-jwts create --issuer https://auth.example.com --audience obsidian \
+  --name tester --claim sub=tester --claim scope="read:obsidian write:obsidian"
+
+npx @modelcontextprotocol/inspector
+# Streamable HTTP, http://localhost:5000/mcp, paste the token as Bearer
 ```
+
+Tests: `dotnet test obsidian-mcp.Tests`.
+
+## CI
+
+`.gitea/workflows/build-image.yml` builds and pushes
+`<REGISTRY>/<IMAGE_OWNER>/obsidian-mcp` on every push to `main` and can then
+trigger a redeploy over SSH. It reads `vars.REGISTRY`, `vars.IMAGE_OWNER`,
+`secrets.AIFACELY_REGISTRY_TOKEN`, and for the deploy step
+`vars.DEPLOY_SERVICE`, `secrets.NAS_CI_SSH_KEY`, `secrets.NAS_SSH_HOST`,
+`secrets.NAS_SSH_KNOWN_HOSTS`. The action URLs and build proxy match my own CI;
+change them in a fork.
 
 ## License
 
